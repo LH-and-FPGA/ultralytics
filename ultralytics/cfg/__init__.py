@@ -435,6 +435,9 @@ def _handle_deprecation(custom: Dict) -> Dict:
         equivalents. It also handles value conversions where necessary, such as inverting boolean values for
         'hide_labels' and 'hide_conf'.
     """
+    # I need to have my lunch, come back later
+    # I finished my lunch, continue to work ~
+    # btw, I made a PR to fix a typo in utils.py, my first pr to ultralytics haha ~
     deprecated_mappings = {
         "boxes": ("show_boxes", lambda v: v),
         "hide_labels": ("show_labels", lambda v: not bool(v)),

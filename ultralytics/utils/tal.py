@@ -26,7 +26,7 @@ class TaskAlignedAssigner(nn.Module):
         eps (float): A small value to prevent division by zero.
     """
 
-    def __init__(self, topk: int = 13, num_classes: int = 80, alpha: float = 1.0, beta: float = 6.0, eps: float = 1e-9):
+    def __init__(self, topk: int = 13, num_classes: int = 80, alpha: float = 1.0, beta: float = 6.0, eps: float = 1e-9, multi_label: bool = False):
         """
         Initialize a TaskAlignedAssigner object with customizable hyperparameters.
 
@@ -36,6 +36,7 @@ class TaskAlignedAssigner(nn.Module):
             alpha (float, optional): The alpha parameter for the classification component of the task-aligned metric.
             beta (float, optional): The beta parameter for the localization component of the task-aligned metric.
             eps (float, optional): A small value to prevent division by zero.
+            multi_label (bool, optional): Whether to handle multi-label classification.
         """
         super().__init__()
         self.topk = topk
@@ -43,6 +44,7 @@ class TaskAlignedAssigner(nn.Module):
         self.alpha = alpha
         self.beta = beta
         self.eps = eps
+        self.multi_label = multi_label
 
     @torch.no_grad()
     def forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
@@ -160,7 +162,7 @@ class TaskAlignedAssigner(nn.Module):
         Args:
             pd_scores (torch.Tensor): Predicted classification scores with shape (bs, num_total_anchors, num_classes).
             pd_bboxes (torch.Tensor): Predicted bounding boxes with shape (bs, num_total_anchors, 4).
-            gt_labels (torch.Tensor): Ground truth labels with shape (bs, n_max_boxes, 1).
+            gt_labels (torch.Tensor): Ground truth labels with shape (bs, n_max_boxes, 1) or (bs, n_max_boxes, num_classes) for multi-label.
             gt_bboxes (torch.Tensor): Ground truth boxes with shape (bs, n_max_boxes, 4).
             mask_gt (torch.Tensor): Mask for valid ground truth boxes with shape (bs, n_max_boxes, h*w).
 
@@ -173,11 +175,32 @@ class TaskAlignedAssigner(nn.Module):
         overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_bboxes.dtype, device=pd_bboxes.device)
         bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)
 
-        ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # 2, b, max_num_obj
-        ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj
-        ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj
-        # Get the scores of each grid for each gt cls
-        bbox_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
+        if self.multi_label and gt_labels.shape[-1] > 1:
+            # For multi-label, gt_labels is (bs, n_max_boxes, num_classes)
+            # Aggregate scores across all positive classes
+            # pd_scores: (bs, num_total_anchors, num_classes)
+            # gt_labels: (bs, n_max_boxes, num_classes) - multi-hot
+            
+            # Expand dimensions for broadcasting
+            pd_scores_exp = pd_scores.unsqueeze(1)  # (bs, 1, num_total_anchors, num_classes)
+            gt_labels_exp = gt_labels.unsqueeze(2)  # (bs, n_max_boxes, 1, num_classes)
+            
+            # Compute scores for positive classes
+            # Where gt_labels is 1, take pd_scores; where 0, use 0
+            scores_per_class = pd_scores_exp * gt_labels_exp  # (bs, n_max_boxes, num_total_anchors, num_classes)
+            
+            # Aggregate: use max score across positive classes for each box-anchor pair
+            bbox_scores = scores_per_class.max(dim=-1)[0]  # (bs, n_max_boxes, num_total_anchors)
+        else:
+            # Single-label case
+            ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)  # 2, b, max_num_obj
+            ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)  # b, max_num_obj
+            if gt_labels.shape[-1] == 1:
+                ind[1] = gt_labels.squeeze(-1)  # b, max_num_obj
+            else:
+                ind[1] = gt_labels  # already (b, max_num_obj)
+            # Get the scores of each grid for each gt cls
+            bbox_scores[mask_gt] = pd_scores[ind[0], :, ind[1]][mask_gt]  # b, max_num_obj, h*w
 
         # (b, max_num_obj, 1, 4), (b, 1, h*w, 4)
         pd_boxes = pd_bboxes.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)[mask_gt]
@@ -237,8 +260,7 @@ class TaskAlignedAssigner(nn.Module):
         Compute target labels, target bounding boxes, and target scores for the positive anchor points.
 
         Args:
-            gt_labels (torch.Tensor): Ground truth labels of shape (b, max_num_obj, 1), where b is the
-                                batch size and max_num_obj is the maximum number of objects.
+            gt_labels (torch.Tensor): Ground truth labels of shape (b, max_num_obj, 1) or (b, max_num_obj, num_classes) for multi-label.
             gt_bboxes (torch.Tensor): Ground truth bounding boxes of shape (b, max_num_obj, 4).
             target_gt_idx (torch.Tensor): Indices of the assigned ground truth objects for positive
                                     anchor points, with shape (b, h*w), where h*w is the total
@@ -247,32 +269,49 @@ class TaskAlignedAssigner(nn.Module):
                               (foreground) anchor points.
 
         Returns:
-            target_labels (torch.Tensor): Target labels for positive anchor points with shape (b, h*w).
+            target_labels (torch.Tensor): Target labels for positive anchor points with shape (b, h*w) or (b, h*w, num_classes) for multi-label.
             target_bboxes (torch.Tensor): Target bounding boxes for positive anchor points with shape (b, h*w, 4).
             target_scores (torch.Tensor): Target scores for positive anchor points with shape (b, h*w, num_classes).
         """
-        # Assigned target labels, (b, 1)
         batch_ind = torch.arange(end=self.bs, dtype=torch.int64, device=gt_labels.device)[..., None]
-        target_gt_idx = target_gt_idx + batch_ind * self.n_max_boxes  # (b, h*w)
-        target_labels = gt_labels.long().flatten()[target_gt_idx]  # (b, h*w)
-
+        target_gt_idx_flat = target_gt_idx + batch_ind * self.n_max_boxes  # (b, h*w)
+        
         # Assigned target boxes, (b, max_num_obj, 4) -> (b, h*w, 4)
-        target_bboxes = gt_bboxes.view(-1, gt_bboxes.shape[-1])[target_gt_idx]
-
-        # Assigned target scores
-        target_labels.clamp_(0)
-
-        # 10x faster than F.one_hot()
-        target_scores = torch.zeros(
-            (target_labels.shape[0], target_labels.shape[1], self.num_classes),
-            dtype=torch.int64,
-            device=target_labels.device,
-        )  # (b, h*w, 80)
-        target_scores.scatter_(2, target_labels.unsqueeze(-1), 1)
-
-        fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)  # (b, h*w, 80)
-        target_scores = torch.where(fg_scores_mask > 0, target_scores, 0)
-
+        target_bboxes = gt_bboxes.view(-1, gt_bboxes.shape[-1])[target_gt_idx_flat]
+        
+        if self.multi_label and gt_labels.shape[-1] > 1:
+            # Multi-label case: gt_labels is (b, max_num_obj, num_classes)
+            # Reshape and gather multi-hot vectors
+            gt_labels_flat = gt_labels.view(-1, gt_labels.shape[-1])  # (b*max_num_obj, num_classes)
+            target_scores = gt_labels_flat[target_gt_idx_flat]  # (b, h*w, num_classes)
+            
+            # Apply foreground mask
+            fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)  # (b, h*w, num_classes)
+            target_scores = torch.where(fg_scores_mask > 0, target_scores, torch.zeros_like(target_scores))
+            
+            # For compatibility, also return target_labels as the argmax of multi-hot
+            target_labels = target_scores.argmax(dim=-1)  # (b, h*w)
+        else:
+            # Single-label case
+            if gt_labels.shape[-1] == 1:
+                target_labels = gt_labels.long().flatten()[target_gt_idx_flat]  # (b, h*w)
+            else:
+                target_labels = gt_labels.long().view(-1)[target_gt_idx_flat]  # (b, h*w)
+            
+            # Assigned target scores
+            target_labels.clamp_(0)
+            
+            # 10x faster than F.one_hot()
+            target_scores = torch.zeros(
+                (target_labels.shape[0], target_labels.shape[1], self.num_classes),
+                dtype=torch.int64,
+                device=target_labels.device,
+            )  # (b, h*w, num_classes)
+            target_scores.scatter_(2, target_labels.unsqueeze(-1), 1)
+            
+            fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)  # (b, h*w, num_classes)
+            target_scores = torch.where(fg_scores_mask > 0, target_scores, 0)
+        
         return target_labels, target_bboxes, target_scores
 
     @staticmethod

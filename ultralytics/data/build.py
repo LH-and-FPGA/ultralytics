@@ -140,6 +140,8 @@ def build_yolo_dataset(
         classes=cfg.classes,
         data=data,
         fraction=cfg.fraction if mode == "train" else 1.0,
+        multi_label=getattr(cfg, 'multi_label', False),  # Pass multi_label flag
+        args=cfg,  # Pass the entire config for access to all args
     )
 
 

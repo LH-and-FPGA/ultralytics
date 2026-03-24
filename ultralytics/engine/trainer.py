@@ -151,6 +151,7 @@ class BaseTrainer:
         self.model = check_model_file_from_stem(self.args.model)  # add suffix, i.e. yolo11n -> yolo11n.pt
         with torch_distributed_zero_first(LOCAL_RANK):  # avoid auto-downloading dataset multiple times
             self.data = self.get_dataset()
+            print("BaseTrainer data:", self.data)
 
         self.ema = None
 
@@ -343,9 +344,12 @@ class BaseTrainer:
 
     def _do_train(self, world_size=1):
         """Train the model with the specified world size."""
+        if self.args.multi_label:
+            print("Using Multi-label training")
         if world_size > 1:
             self._setup_ddp(world_size)
         self._setup_train(world_size)
+        # We will load our data and prepare for training
 
         nb = len(self.train_loader)  # number of batches
         nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1  # warmup iterations

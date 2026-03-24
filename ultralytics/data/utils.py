@@ -177,11 +177,51 @@ def verify_image(args: Tuple) -> Tuple:
     return (im_file, cls), nf, nc, msg
 
 
+def merge_multi_label_boxes(lb, num_cls):
+    """
+    Merge boxes with same coordinates but different labels into multi-label format.
+    
+    Args:
+        lb: Label array with shape (n, 5) where columns are [class, x, y, w, h]
+        num_cls: Number of classes
+        
+    Returns:
+        Tuple of (boxes, multi_hot_labels) where:
+        - boxes: Unique boxes array with shape (m, 4) [x, y, w, h]
+        - multi_hot_labels: Multi-hot encoded labels with shape (m, num_cls)
+    """
+    if len(lb) == 0:
+        return np.zeros((0, 4), dtype=np.float32), np.zeros((0, num_cls), dtype=np.float32)
+    
+    # Dictionary to store unique boxes and their associated classes
+    box_dict = {}
+    for row in lb:
+        box_key = tuple(row[1:5].round(6))  # Round to avoid floating point issues
+        cls_idx = int(row[0])
+        
+        if box_key not in box_dict:
+            box_dict[box_key] = []
+        if cls_idx not in box_dict[box_key]:
+            box_dict[box_key].append(cls_idx)
+    
+    # Convert to arrays
+    boxes = np.array(list(box_dict.keys()), dtype=np.float32)
+    multi_hot = np.zeros((len(boxes), num_cls), dtype=np.float32)
+    
+    for i, (box_key, cls_indices) in enumerate(box_dict.items()):
+        for cls_idx in cls_indices:
+            multi_hot[i, cls_idx] = 1.0
+    
+    return boxes, multi_hot
+
+
 def verify_image_label(args: Tuple) -> List:
     """Verify one image-label pair."""
     im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls = args
     # Number (missing, found, empty, corrupt), message, segments, keypoints
     nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
+    multi_label = False  # Will be determined from args in the calling function
+    
     try:
         # Verify images
         im = Image.open(im_file)
@@ -224,18 +264,29 @@ def verify_image_label(args: Tuple) -> List:
                     f"Label class {int(max_cls)} exceeds dataset class count {num_cls}. "
                     f"Possible class labels are 0-{num_cls - 1}"
                 )
+                
+                # Don't remove duplicates if they're multi-label annotations
+                # (same box, different class is valid for multi-label)
                 _, i = np.unique(lb, axis=0, return_index=True)
                 if len(i) < nl:  # duplicate row check
-                    lb = lb[i]  # remove duplicates
-                    if segments:
-                        segments = [segments[x] for x in i]
-                    msg = f"{prefix}{im_file}: {nl - len(i)} duplicate labels removed"
+                    # Check if duplicates are same box with different classes (multi-label case)
+                    unique_boxes = np.unique(lb[:, 1:5], axis=0)
+                    if len(unique_boxes) < nl and len(unique_boxes) > len(i):
+                        # This looks like multi-label data (same boxes with different classes)
+                        # Keep all rows for now, will be merged later
+                        pass
+                    else:
+                        # These are true duplicates, remove them
+                        lb = lb[i]
+                        if segments:
+                            segments = [segments[x] for x in i]
+                        msg = f"{prefix}{im_file}: {nl - len(i)} duplicate labels removed"
             else:
                 ne = 1  # label empty
                 lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
         else:
             nm = 1  # label missing
-            lb = np.zeros((0, (5 + nkpt * ndim) if keypoints else 5), dtype=np.float32)
+            lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
         if keypoint:
             keypoints = lb[:, 5:].reshape(-1, nkpt, ndim)
             if ndim == 2:

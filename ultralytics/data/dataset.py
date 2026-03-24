@@ -84,6 +84,12 @@ class YOLODataset(BaseDataset):
         self.use_keypoints = task == "pose"
         self.use_obb = task == "obb"
         self.data = data
+        # Extract multi_label flag and args from kwargs
+        self.multi_label = kwargs.pop('multi_label', False)
+        self.args = kwargs.pop('args', None)  # Extract args and store it
+        # Also check if it's in args attribute
+        if self.args and hasattr(self.args, 'multi_label'):
+            self.multi_label = self.args.multi_label
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
         super().__init__(*args, channels=self.data["channels"], **kwargs)
 
@@ -97,6 +103,8 @@ class YOLODataset(BaseDataset):
         Returns:
             (dict): Dictionary containing cached labels and related information.
         """
+        from ultralytics.data.utils import merge_multi_label_boxes
+        
         x = {"labels": []}
         nm, nf, ne, nc, msgs = 0, 0, 0, 0, []  # number missing, found, empty, corrupt, messages
         desc = f"{self.prefix}Scanning {path.parent / path.stem}..."
@@ -107,6 +115,10 @@ class YOLODataset(BaseDataset):
                 "'kpt_shape' in data.yaml missing or incorrect. Should be a list with [number of "
                 "keypoints, number of dims (2 for x,y or 3 for x,y,visible)], i.e. 'kpt_shape: [17, 3]'"
             )
+        
+        # Check if multi-label mode is enabled
+        multi_label = getattr(self, 'multi_label', False) or (hasattr(self, 'args') and getattr(self.args, 'multi_label', False))
+        
         with ThreadPool(NUM_THREADS) as pool:
             results = pool.imap(
                 func=verify_image_label,
@@ -128,18 +140,36 @@ class YOLODataset(BaseDataset):
                 ne += ne_f
                 nc += nc_f
                 if im_file:
-                    x["labels"].append(
-                        {
-                            "im_file": im_file,
-                            "shape": shape,
-                            "cls": lb[:, 0:1],  # n, 1
-                            "bboxes": lb[:, 1:],  # n, 4
-                            "segments": segments,
-                            "keypoints": keypoint,
-                            "normalized": True,
-                            "bbox_format": "xywh",
-                        }
-                    )
+                    if multi_label and len(lb) > 0:
+                        # Merge boxes with same coordinates but different labels
+                        boxes, multi_hot_cls = merge_multi_label_boxes(lb, len(self.data["names"]))
+                        x["labels"].append(
+                            {
+                                "im_file": im_file,
+                                "shape": shape,
+                                "cls": multi_hot_cls,  # n, num_classes (multi-hot)
+                                "bboxes": boxes,  # n, 4
+                                "segments": segments,
+                                "keypoints": keypoint,
+                                "normalized": True,
+                                "bbox_format": "xywh",
+                                "multi_label": True,
+                            }
+                        )
+                    else:
+                        x["labels"].append(
+                            {
+                                "im_file": im_file,
+                                "shape": shape,
+                                "cls": lb[:, 0:1] if len(lb) else np.zeros((0, 1)),  # n, 1
+                                "bboxes": lb[:, 1:] if len(lb) else np.zeros((0, 4)),  # n, 4
+                                "segments": segments,
+                                "keypoints": keypoint,
+                                "normalized": True,
+                                "bbox_format": "xywh",
+                                "multi_label": False,
+                            }
+                        )
                 if msg:
                     msgs.append(msg)
                 pbar.desc = f"{desc} {nf} images, {nm + ne} backgrounds, {nc} corrupt"
@@ -152,6 +182,7 @@ class YOLODataset(BaseDataset):
         x["hash"] = get_hash(self.label_files + self.im_files)
         x["results"] = nf, nm, ne, nc, len(self.im_files)
         x["msgs"] = msgs  # warnings
+        x["multi_label"] = multi_label  # Store multi-label flag in cache
         save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
         return x
 

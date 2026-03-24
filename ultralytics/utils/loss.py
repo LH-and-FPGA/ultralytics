@@ -207,10 +207,11 @@ class v8DetectionLoss:
         self.no = m.nc + m.reg_max * 4
         self.reg_max = m.reg_max
         self.device = device
+        self.multi_label = getattr(h, 'multi_label', False)  # Check for multi-label mode
 
         self.use_dfl = m.reg_max > 1
 
-        self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
+        self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0, multi_label=self.multi_label)
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
@@ -257,9 +258,46 @@ class v8DetectionLoss:
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # Targets
-        targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
-        targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
-        gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
+        if self.multi_label:
+            # For multi-label, cls is already multi-hot encoded (n, num_classes)
+            batch_idx = batch["batch_idx"].view(-1, 1)
+            cls = batch["cls"]  # (n, num_classes) for multi-label
+            bboxes = batch["bboxes"]
+            
+            # Build gt_labels_multi and gt_bboxes separately for multi-label
+            # Group by batch index to construct proper tensors
+            gt_labels_multi = []
+            gt_bboxes_list = []
+            for b in range(batch_size):
+                mask = (batch_idx[:, 0] == b)
+                if mask.sum() > 0:
+                    gt_labels_multi.append(cls[mask])  # (n_obj, num_classes)
+                    gt_bboxes_list.append(bboxes[mask])  # (n_obj, 4)
+                else:
+                    gt_labels_multi.append(torch.zeros((0, self.nc), device=self.device, dtype=cls.dtype))
+                    gt_bboxes_list.append(torch.zeros((0, 4), device=self.device, dtype=bboxes.dtype))
+            
+            # Pad to max_num_obj
+            max_num_obj = max(len(labels) for labels in gt_labels_multi) if gt_labels_multi else 0
+            if max_num_obj == 0:
+                gt_labels = torch.zeros((batch_size, 1, self.nc), device=self.device, dtype=cls.dtype)
+                gt_bboxes = torch.zeros((batch_size, 1, 4), device=self.device, dtype=bboxes.dtype)
+            else:
+                gt_labels = torch.zeros((batch_size, max_num_obj, self.nc), device=self.device, dtype=cls.dtype)
+                gt_bboxes = torch.zeros((batch_size, max_num_obj, 4), device=self.device, dtype=bboxes.dtype)
+                for b in range(batch_size):
+                    n = len(gt_labels_multi[b])
+                    if n > 0:
+                        gt_labels[b, :n] = gt_labels_multi[b]
+                        gt_bboxes[b, :n] = gt_bboxes_list[b]
+            
+            # Scale bboxes
+            gt_bboxes = gt_bboxes * imgsz[[1, 0, 1, 0]]
+            gt_bboxes = xywh2xyxy(gt_bboxes)
+        else:
+            targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
+            targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+            gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
 
         # Pboxes

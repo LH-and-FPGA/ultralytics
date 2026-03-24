@@ -101,6 +101,7 @@ class Detect(nn.Module):
                     nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
                     nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
                     nn.Conv2d(c3, self.nc, 1),
+                    # 直接输出 nc 个通道，每个通道对应一个类别的logits
                 )
                 for x in ch
             )
@@ -182,6 +183,7 @@ class Detect(nn.Module):
             dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
         if self.export and self.format == "imx":
             return dbox.transpose(1, 2), cls.sigmoid().permute(0, 2, 1)
+        # We already have sigmoid here
         return torch.cat((dbox, cls.sigmoid()), 1)
 
     def bias_init(self):

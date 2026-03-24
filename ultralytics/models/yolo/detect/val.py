@@ -57,6 +57,7 @@ class DetectionValidator(BaseValidator):
         self.args.task = "detect"
         self.iouv = torch.linspace(0.5, 0.95, 10)  # IoU vector for mAP@0.5:0.95
         self.niou = self.iouv.numel()
+        # I need to add multi-label support here.
         self.metrics = DetMetrics()
 
     def preprocess(self, batch: Dict[str, Any]) -> Dict[str, Any]:
@@ -185,20 +186,30 @@ class DetectionValidator(BaseValidator):
 
             cls = pbatch["cls"].cpu().numpy()
             no_pred = len(predn["cls"]) == 0
+            
+            # Handle multi-label case for target_img
+            if cls.ndim == 2:  # Multi-label case (n, num_classes)
+                # Get unique classes present in this image
+                target_img = np.where(cls.any(axis=0))[0]
+            else:  # Single-label case
+                target_img = np.unique(cls)
+            
             self.metrics.update_stats(
                 {
                     **self._process_batch(predn, pbatch),
                     "target_cls": cls,
-                    "target_img": np.unique(cls),
+                    "target_img": target_img,
                     "conf": np.zeros(0) if no_pred else predn["conf"].cpu().numpy(),
                     "pred_cls": np.zeros(0) if no_pred else predn["cls"].cpu().numpy(),
                 }
             )
-            # Evaluate
+        # Evaluate
             if self.args.plots:
-                self.confusion_matrix.process_batch(predn, pbatch, conf=self.args.conf)
-                if self.args.visualize:
-                    self.confusion_matrix.plot_matches(batch["img"][si], pbatch["im_file"], self.save_dir)
+                # Only compute confusion matrix when ground truth is single-label
+                if cls.ndim == 1:
+                    self.confusion_matrix.process_batch(predn, pbatch, conf=self.args.conf)
+                    if self.args.visualize:
+                        self.confusion_matrix.plot_matches(batch["img"][si], pbatch["im_file"], self.save_dir)
 
             if no_pred:
                 continue
@@ -270,8 +281,54 @@ class DetectionValidator(BaseValidator):
         if len(batch["cls"]) == 0 or len(preds["cls"]) == 0:
             return {"tp": np.zeros((len(preds["cls"]), self.niou), dtype=bool)}
         iou = box_iou(batch["bboxes"], preds["bboxes"])
-        return {"tp": self.match_predictions(preds["cls"], batch["cls"], iou).cpu().numpy()}
+        
+        # Check if we're in multi-label mode
+        if batch["cls"].dim() == 2 and batch["cls"].shape[1] > 1:
+            # Multi-label mode
+            return {"tp": self.match_predictions_multilabel(preds["cls"], batch["cls"], iou).cpu().numpy()}
+        else:
+            # Single-label mode
+            return {"tp": self.match_predictions(preds["cls"], batch["cls"], iou).cpu().numpy()}
 
+    def match_predictions_multilabel(self, pred_classes, true_classes, iou, use_scipy=False):
+        """
+        Match predictions with ground truth for multi-label classification (per-class greedy matching).
+
+        Args:
+            pred_classes (torch.Tensor): Predicted classes of shape (N,) - single class per detection
+            true_classes (torch.Tensor): Ground truth multi-hot classes of shape (M, C)
+            iou (torch.Tensor): IoU matrix of shape (M, N)
+            use_scipy (bool): Unused; kept for signature compatibility
+
+        Returns:
+            (torch.Tensor): Correct tensor of shape (N, 10) for 10 IoU thresholds
+        """
+        import torch
+
+        num_preds = pred_classes.shape[0]
+        num_thres = self.iouv.shape[0]
+        correct = torch.zeros((num_preds, num_thres), dtype=torch.bool, device=pred_classes.device)
+
+        # Iterate IoU thresholds independently to enforce 1-1 matching at each threshold
+        for t_idx, thr in enumerate(self.iouv.to(iou.device)):
+            used_pred = torch.zeros(num_preds, dtype=torch.bool, device=pred_classes.device)
+
+            # For each GT, match per positive class independently
+            for gt_idx in range(true_classes.shape[0]):
+                gt_pos_classes = torch.where(true_classes[gt_idx] > 0)[0]
+                if gt_pos_classes.numel() == 0:
+                    continue
+
+                for cls in gt_pos_classes:
+                    cand_mask = (pred_classes == cls) & (iou[gt_idx] >= thr) & (~used_pred)
+                    if not cand_mask.any():
+                        continue
+                    best_local_idx = torch.argmax(iou[gt_idx] * cand_mask.float())
+                    correct[best_local_idx, t_idx] = True
+                    used_pred[best_local_idx] = True
+
+        return correct
+    
     def build_dataset(self, img_path: str, mode: str = "val", batch: Optional[int] = None) -> torch.utils.data.Dataset:
         """
         Build YOLO Dataset.

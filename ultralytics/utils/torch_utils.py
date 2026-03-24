@@ -481,6 +481,7 @@ def get_flops_with_torch_profiler(model, imgsz=640):
 
 def initialize_weights(model):
     """Initialize model weights to random values."""
+    # https://claude.ai/share/fc5acfa4-b645-4cff-a9bc-be07e47de223
     for m in model.modules():
         t = type(m)
         if t is nn.Conv2d:

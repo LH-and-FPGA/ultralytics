@@ -279,6 +279,7 @@ class BaseModel(torch.nn.Module):
 
     def _apply(self, fn):
         """
+        Check: Why do we need to use this?
         Apply a function to all tensors in the model that are not parameters or registered buffers.
 
         Args:
@@ -382,7 +383,9 @@ class DetectionModel(BaseModel):
             verbose (bool): Whether to display model information.
         """
         super().__init__()
+        # init the torch module
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
+        # If we use default YOLO and detection task, the cfg will be dict
         if self.yaml["backbone"][0][2] == "Silence":
             LOGGER.warning(
                 "YOLOv9 `Silence` module is deprecated in favor of torch.nn.Identity. "
@@ -392,14 +395,22 @@ class DetectionModel(BaseModel):
 
         # Define model
         self.yaml["channels"] = ch  # save channels
+        # input channels, default as 3
         if nc and nc != self.yaml["nc"]:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override YAML value
-        self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
+            
+            
+        self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)
+        # We have a full instance of torch model here.
+        # I don't need to change the model architecture, but I do need to change the
+        # loss calculation.
+        # model, savelist
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
         self.end2end = getattr(self.model[-1], "end2end", False)
-
+        
+        # TODO: Do some research on this, it's a very smart design
         # Build strides
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, YOLOEDetect, YOLOESegment

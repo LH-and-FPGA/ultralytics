@@ -1099,11 +1099,20 @@ class DetMetrics(SimpleClass, DataExportMixin):
         stats = {k: np.concatenate(v, 0) for k, v in self.stats.items()}  # to numpy
         if len(stats) == 0:
             return stats
+        # Prepare target classes for AP computation
+        target_cls = stats["target_cls"]
+        if target_cls.ndim == 2:
+            # Multi-label case: flatten multi-hot GT to 1D class ids for AP
+            gt_list = [np.where(row > 0)[0] for row in target_cls]
+            flat_target_cls = np.concatenate(gt_list, axis=0) if len(gt_list) else np.zeros(0, dtype=int)
+        else:
+            flat_target_cls = target_cls
+
         results = ap_per_class(
             stats["tp"],
             stats["conf"],
             stats["pred_cls"],
-            stats["target_cls"],
+            flat_target_cls,
             plot=plot,
             save_dir=save_dir,
             names=self.names,
@@ -1112,8 +1121,21 @@ class DetMetrics(SimpleClass, DataExportMixin):
         )[2:]
         self.box.nc = len(self.names)
         self.box.update(results)
-        self.nt_per_class = np.bincount(stats["target_cls"].astype(int), minlength=len(self.names))
-        self.nt_per_image = np.bincount(stats["target_img"].astype(int), minlength=len(self.names))
+        # Handle both single-label and multi-label cases
+        target_cls = stats["target_cls"]
+        if target_cls.ndim == 2:  # Multi-label case (n, num_classes)
+            # Count presence of each class across all samples
+            self.nt_per_class = target_cls.sum(axis=0).astype(int)
+        else:  # Single-label case
+            self.nt_per_class = np.bincount(target_cls.astype(int), minlength=len(self.names))
+        
+        target_img = stats["target_img"]
+        if target_img.ndim == 2:  # Multi-label case
+            # For per-image stats, count unique images with each class
+            self.nt_per_image = np.zeros(len(self.names), dtype=int)
+            # This is more complex for multi-label, skip for now
+        else:
+            self.nt_per_image = np.bincount(target_img.astype(int), minlength=len(self.names))
         return stats
 
     def clear_stats(self):

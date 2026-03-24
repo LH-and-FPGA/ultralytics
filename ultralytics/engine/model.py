@@ -125,7 +125,7 @@ class Model(torch.nn.Module):
         self.task = task  # task type
         self.model_name = None  # model name
         model = str(model).strip()
-
+                
         # Check if Ultralytics HUB model from https://hub.ultralytics.com
         if self.is_hub_model(model):
             from ultralytics.hub import HUBTrainingSession
@@ -145,9 +145,13 @@ class Model(torch.nn.Module):
 
         # Load or create new YOLO model
         __import__("os").environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"  # to avoid deterministic warnings
+        # Nvidia official doc gives this instruction.
         if str(model).endswith((".yaml", ".yml")):
+            print("Loading model from YAML...")
             self._new(model, task=task, verbose=verbose)
+            # If we use YOLO, model is that yaml file, task=None, verbose=True (I changed it)
         else:
+            print("Loading model from file...")
             self._load(model, task=task)
 
         # Delete super().training for accessing self.model.training
@@ -256,14 +260,19 @@ class Model(torch.nn.Module):
             >>> model._new("yolo11n.yaml", task="detect", verbose=True)
         """
         cfg_dict = yaml_model_load(cfg)
+        print("cfg_dict \n", cfg_dict)
         self.cfg = cfg
         self.task = task or guess_model_task(cfg_dict)
         self.model = (model or self._smart_load("model"))(cfg_dict, verbose=verbose and RANK == -1)  # build model
+        # If we use default YOLO, model is None. So, we use self._smart_load("model")
+        # and this will be self.model = DetectionModel(cfg_dict, verbose=verbose and RANK == -1)
         self.overrides["model"] = self.cfg
         self.overrides["task"] = self.task
 
         # Below added to allow export from YAMLs
         self.model.args = {**DEFAULT_CFG_DICT, **self.overrides}  # combine default and model args (prefer model args)
+        print("self.model.args \n", self.model.args)
+        # I add the multi label flag on default.yaml
         self.model.task = self.task
         self.model_name = cfg
 
@@ -791,6 +800,8 @@ class Model(torch.nn.Module):
             args["resume"] = self.ckpt_path
 
         self.trainer = (trainer or self._smart_load("trainer"))(overrides=args, _callbacks=self.callbacks)
+        # We set up the trainer here
+        
         if not args.get("resume"):  # manually set model only if not resuming
             self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
             self.model = self.trainer.model

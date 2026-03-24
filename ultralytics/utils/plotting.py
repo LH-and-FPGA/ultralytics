@@ -789,17 +789,46 @@ def plot_images(
                 boxes = ops.xywhr2xyxyxyxy(boxes) if is_obb else ops.xywh2xyxy(boxes)
                 for j, box in enumerate(boxes.astype(np.int64).tolist()):
                     c = classes[j]
-                    color = colors(c)
-                    c = names.get(c, c) if names else c
+                    # Handle multi-label case where c might be a multi-hot vector
+                    if isinstance(c, (list, np.ndarray)) and len(c) > 1:
+                        # Multi-label: find all positive classes
+                        positive_classes = np.where(c)[0] if isinstance(c, np.ndarray) else [i for i, v in enumerate(c) if v]
+                        if len(positive_classes) > 0:
+                            # Use first positive class for color
+                            color = colors(positive_classes[0])
+                            # Create label with all positive classes
+                            class_names = [names.get(pc, pc) if names else pc for pc in positive_classes]
+                            c_str = ','.join(map(str, class_names))
+                        else:
+                            color = colors(0)
+                            c_str = "unknown"
+                    else:
+                        # Single-label case
+                        c_val = int(c) if not isinstance(c, int) else c
+                        color = colors(c_val)
+                        c_str = names.get(c_val, c_val) if names else c_val
+                    
                     if labels or conf[j] > conf_thres:
-                        label = f"{c}" if labels else f"{c} {conf[j]:.1f}"
+                        label = f"{c_str}" if labels else f"{c_str} {conf[j]:.1f}"
                         annotator.box_label(box, label, color=color)
 
             elif len(classes):
                 for c in classes:
-                    color = colors(c)
-                    c = names.get(c, c) if names else c
-                    annotator.text([x, y], f"{c}", txt_color=color, box_color=(64, 64, 64, 128))
+                    # Handle multi-label case
+                    if isinstance(c, (list, np.ndarray)) and len(c) > 1:
+                        positive_classes = np.where(c)[0] if isinstance(c, np.ndarray) else [i for i, v in enumerate(c) if v]
+                        if len(positive_classes) > 0:
+                            color = colors(positive_classes[0])
+                            class_names = [names.get(pc, pc) if names else pc for pc in positive_classes]
+                            c_str = ','.join(map(str, class_names))
+                        else:
+                            color = colors(0)
+                            c_str = "unknown"
+                    else:
+                        c_val = int(c) if not isinstance(c, int) else c
+                        color = colors(c_val)
+                        c_str = names.get(c_val, c_val) if names else c_val
+                    annotator.text([x, y], f"{c_str}", txt_color=color, box_color=(64, 64, 64, 128))
 
             # Plot keypoints
             if len(kpts):
